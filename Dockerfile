@@ -1,0 +1,110 @@
+# syntax=docker/dockerfile:1.3.0-labs
+# "syntax=docker/dockerfile:1.3.0-labs" is necessary for creating the pip cache
+
+# Instruction for Dockerfile to create a new image on top of the base image of nvidia/cuda
+# pytorch and tensorflow are installed in the conda env, i.e., base
+
+# change BASE accordingly. From https://hub.docker.com/r/nvidia/cuda
+ARG BASE=nvidia/cuda:11.8.0-cudnn8-devel-ubuntu20.04
+FROM $BASE
+
+# change BASE accordingly
+ARG USER=dityudha
+ARG PASSWORD=asdasd123
+ARG UID=1000
+ARG GID=1000
+
+# Setup timezone
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# necessary update
+RUN apt-key adv --keyserver keyserver.ubuntu.com --recv-keys A4B469963BF863CC && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    wget ca-certificates git openssh-server sudo vim curl libpam-cracklib tzdata dumb-init screen && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+#-------- add a new user --------
+RUN addgroup --gid ${GID} ${USER} && \
+    adduser --uid ${UID} --gid ${GID} --gecos "" --disabled-password ${USER} && \
+    usermod -G root,sudo ${USER} && \
+    echo "${USER}:${PASSWORD}" | chpasswd
+#RUN sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+#RUN sed 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@g' -i /etc/pam.d/sshd
+
+# switch user
+ENV PATH "/home/$USER/.local/bin:$PATH"
+USER ${USER}
+WORKDIR /home/${USER}
+ENV PATH=/home/${USER}/.conda/bin:$PATH \
+    HOME=/home/${USER}
+
+# for ssh connection
+RUN mkdir -p /home/${USER}/.local/my_sshd && \
+    ssh-keygen -f /home/${USER}/.local/my_sshd/ssh_host_rsa_key -N '' -t rsa && \
+    ssh-keygen -f /home/${USER}/.local/my_sshd/ssh_host_dsa_key -N '' -t dsa && \
+    echo "Port 22" >> /home/${USER}/.local/my_sshd/sshd_config && \
+    echo "HostKey /home/${USER}/.local/my_sshd/ssh_host_rsa_key" >> /home/${USER}/.local/my_sshd/sshd_config && \
+    echo "HostKey /home/${USER}/.local/my_sshd/ssh_host_dsa_key" >> /home/${USER}/.local/my_sshd/sshd_config && \
+    echo "AuthorizedKeysFile  .ssh/authorized_keys" >> /home/${USER}/.local/my_sshd/sshd_config && \
+    echo "ChallengeResponseAuthentication no" >> /home/${USER}/.local/my_sshd/sshd_config && \
+    echo "UsePAM yes" >> /home/${USER}/.local/my_sshd/sshd_config && \
+    echo "Subsystem   sftp    /usr/lib/sftp-server" >> /home/${USER}/.local/my_sshd/sshd_config && \
+    echo "PidFile /home/${USER}/.local/my_sshd/sshd.pi" >> /home/${USER}/.local/my_sshd/sshd_config
+
+# Install miniconda (python)
+# See https://docs.conda.io/projects/miniconda/en/latest/miniconda-other-installer-links.html
+RUN curl -o ~/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-py310_23.5.2-0-Linux-x86_64.sh && \
+    chmod +x ~/miniconda.sh && \
+    /bin/bash ./miniconda.sh -b -p /home/${USER}/.conda && \
+    rm ~/miniconda.sh && \
+    conda config --system --prepend channels conda-forge && \
+    conda config --system --set auto_update_conda false && \
+    conda config --system --set show_channel_urls true && \
+    pip config set global.index-url https://pypi.mirrors.ustc.edu.cn/simple && \
+    pip install --upgrade pip
+
+# # install ipykernel, jupyter, pytorch, and tensorflow
+RUN --mount=type=cache,mode=0777,target=/home/${USER}/.cache,uid=${UID},gid=${GID} \
+    pip install ipykernel==6.25.2 && \
+    pip install notebook==7.0.4 jupyterlab==4.0.6 && \
+    pip install torch==2.0.1+cu118 torchvision==0.15.2+cu118 torchaudio==2.0.2+cu118 --index-url https://download.pytorch.org/whl/cu118 && \
+    # sed -i 's/Python 3 (ipykernel)/base (pytorch-2.0.1)/g' /home/${USER}/.conda/share/jupyter/kernels/python3/kernel.json && \
+    pip install transformers==4.33.3 scipy==1.11.3 SentencePiece==0.1.99 accelerate==0.23.0 bitsandbytes==0.41.1 && \
+    # Install in this way when the cuda version of the system doesn't match with the required version of PyTorch
+    # git clone https://github.com/timdettmers/bitsandbytes.git && \
+    # cd bitsandbytes && \
+    # CUDA_VERSION=118 make cuda11x && \
+    # python setup.py install && \
+    # rm -r ../bitsandbytes && \
+    pip install protobuf==4.24.3 tensorflow==2.14.0
+
+# set plugins and kernels for jupyter
+RUN --mount=type=cache,mode=0777,target=/home/${USER}/.cache,uid=${UID},gid=${GID} \
+    # source activate base && \
+    pip install matplotlib==3.8.0 jupyter_http_over_ws==0.0.8 nbconvert==7.8.0 traitlets==5.10.1 nbclassic==1.0.0 && \
+    jupyter notebook --generate-config && \
+    jupyter server --generate-config && \
+    jupyter server extension enable --py jupyter_http_over_ws
+    # for notebook < 7.0
+    # jupyter contrib nbextension install --user && \
+    # jupyter serverextension enable --py jupyter_http_over_ws
+
+RUN tmp="$(python3 -c "from jupyter_server.auth import passwd; print(passwd('$PASSWORD'))")" && \
+    echo "c.ServerApp.password='$tmp'">>/home/${USER}/.jupyter/jupyter_server_config.py && \
+    echo "c.ServerApp.open_browser=False">>/home/${USER}/.jupyter/jupyter_server_config.py && \
+    echo "c.ServerApp.terminado_settings = {'shell_command': ['/bin/bash']}">>/home/${USER}/.jupyter/jupyter_server_config.py && \
+    conda init
+
+# RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone  # if you need code server
+
+# allow utf-8 characters in terminal
+ENV LANG C.UTF-8
+ENV LC_ALL C.UTF-8
+
+# install frequently used packages
+RUN --mount=type=cache,mode=0777,target=/home/${USER}/.cache,uid=${UID},gid=${GID} \
+    pip install pandas scikit-learn tqdm 
+
+EXPOSE 22 8888 1000 1001 1002
